@@ -1,0 +1,160 @@
+name: Update tag lists
+
+on:
+  schedule:
+    # 03:00 UTC on the 1st of every month
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      danbooru_threshold:
+        description: "Min post_count for danbooru tags (min 5)"
+        default: "20"
+        required: false
+      e621_threshold:
+        description: "Min post_count for e621 tags (min 5)"
+        default: "20"
+        required: false
+      gelbooru_threshold:
+        description: "Min post_count for gelbooru tags (min 5, only used if include_gelbooru=true)"
+        default: "20"
+        required: false
+      include_gelbooru:
+        description: "Also scrape Gelbooru — slow, needs GELBOORU_API_KEY/GELBOORU_USER_ID secrets"
+        type: boolean
+        default: false
+        required: false
+      include_aliases:
+        description: "Include the aliases column in generated CSVs"
+        type: boolean
+        default: true
+        required: false
+      include_deleted_aliases:
+        description: "Include deleted/inactive aliases"
+        type: boolean
+        default: true
+        required: false
+      include_pending_aliases:
+        description: "Include e621 pending aliases"
+        type: boolean
+        default: false
+        required: false
+      merged_post_count:
+        description: "post_count strategy for duplicate tags in the merged list"
+        type: choice
+        default: "sum"
+        options:
+          - sum
+          - danbooru
+          - e621
+          - none
+        required: false
+      skip_danbooru:
+        description: "Skip fetching danbooru this run"
+        type: boolean
+        default: false
+        required: false
+      skip_e621:
+        description: "Skip fetching e621 this run"
+        type: boolean
+        default: false
+        required: false
+      krita_output:
+        description: "Also write Krita AI Diffusion-compatible CSVs (tag-lists/krita_ai_compatible/)"
+        type: boolean
+        default: false
+        required: false
+      wildcards:
+        description: "Generate ComfyUI wildcard files (YAML + TXT) for these source(s)"
+        type: choice
+        default: "none"
+        options:
+          - none
+          - danbooru
+          - e621
+          - both
+        required: false
+      max_age_days:
+        description: "Delete CSVs older than this many days (0 = never)"
+        default: "180"
+        required: false
+      dry_run:
+        description: "Run the pipeline but don't commit/push the result (still uploads as artifact)"
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-tag-lists
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Gelbooru runs can take a long time — give CI enough rope when include_gelbooru=true, otherwise fail fast.
+    timeout-minutes: ${{ github.event.inputs.include_gelbooru == 'true' && 360 || 60 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tagsync
+        env:
+          TAGSYNC_LOG_LEVEL: INFO
+          GELBOORU_API_KEY: ${{ secrets.GELBOORU_API_KEY }}
+          GELBOORU_USER_ID: ${{ secrets.GELBOORU_USER_ID }}
+        run: |
+          # The scheduled (cron) trigger has no workflow_dispatch inputs at all, so
+          # every `|| 'x'` fallback below must match the input's own `default`
+          ARGS=(
+            --danbooru-threshold "${{ github.event.inputs.danbooru_threshold || '20' }}"
+            --e621-threshold "${{ github.event.inputs.e621_threshold || '20' }}"
+            --gelbooru-threshold "${{ github.event.inputs.gelbooru_threshold || '20' }}"
+            --merged-post-count "${{ github.event.inputs.merged_post_count || 'sum' }}"
+            --wildcards "${{ github.event.inputs.wildcards || 'none' }}"
+            --max-age-days "${{ github.event.inputs.max_age_days || '180' }}"
+          )
+          [ "${{ github.event.inputs.include_gelbooru || 'false' }}" = "true" ] && ARGS+=(--include-gelbooru)
+          [ "${{ github.event.inputs.include_aliases || 'true' }}" = "false" ] && ARGS+=(--no-aliases)
+          [ "${{ github.event.inputs.include_deleted_aliases || 'true' }}" = "false" ] && ARGS+=(--no-deleted-aliases)
+          [ "${{ github.event.inputs.include_pending_aliases || 'false' }}" = "true" ] && ARGS+=(--include-pending-aliases)
+          [ "${{ github.event.inputs.skip_danbooru || 'false' }}" = "true" ] && ARGS+=(--skip-danbooru)
+          [ "${{ github.event.inputs.skip_e621 || 'false' }}" = "true" ] && ARGS+=(--skip-e621)
+          [ "${{ github.event.inputs.krita_output || 'false' }}" = "true" ] && ARGS+=(--krita-output)
+
+          echo "Running: python -m tagsync.main ${ARGS[*]}"
+          python -m tagsync.main "${ARGS[@]}"
+
+      - name: Commit and push changes
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # tag-lists/*.csv (and .yaml/.txt) are gitignored locally so a dev run
+          # doesn't accidentally get committed — -f overrides that here, since
+          # this generated output is exactly what CI is supposed to commit.
+          git add -f tag-lists/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: update tag lists ($(date -u +%Y-%m-%d))"
+          git push
+
+      - name: Upload run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tag-lists-${{ github.run_id }}
+          path: tag-lists/
+          retention-days: 14

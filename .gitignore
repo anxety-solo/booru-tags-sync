@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+.venv/
+venv/
+.env/
+
+# Gelbooru resume checkpoint
+.cache/
+
+# generated output (CI force-adds tag-lists/ past this on commit)
+tag-lists/**/*.csv
+tag-lists/**/*.yaml
+tag-lists/**/*.txt
